@@ -24,7 +24,7 @@ mod tcp;
 pub mod time;
 mod tls;
 mod units;
-mod worker;
+pub mod worker;
 
 pub use admin::{Admin, AdminConfig};
 pub use array::ArrayConfig;

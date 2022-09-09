@@ -10,7 +10,9 @@ use crate::poll::{Poll, LISTENER_TOKEN, WAKER_TOKEN};
 use crate::*;
 use common::signal::Signal;
 use common::ssl::{HandshakeError, MidHandshakeSslStream, Ssl, SslContext, SslStream};
-use config::ServerConfig;
+// stefan: add WorkerConfig
+use config::{ServerConfig, WorkerConfig};
+use config::worker::Balance;
 use mio::event::Event;
 use mio::Events;
 use mio::Token;
@@ -19,6 +21,10 @@ use session::{Session, TcpStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+
+// stefan: add missing libc consts
+// const SO_PRIORITY: libc::c_int = 12;
+const SO_INCOMING_NAPI_ID: libc::c_int = 56;
 
 counter!(SERVER_EVENT_ERROR);
 counter!(SERVER_EVENT_WRITE);
@@ -33,16 +39,20 @@ pub struct ListenerBuilder {
     poll: Poll,
     ssl_context: Option<SslContext>,
     timeout: Duration,
+    balance: Balance,
+    workers: usize,
 }
 
 impl ListenerBuilder {
     /// Creates a new `Listener` from a `ServerConfig` and an optional
     /// `SslContext`.
-    pub fn new<T: ServerConfig>(
+    pub fn new<T: ServerConfig + WorkerConfig>(
         config: &T,
         ssl_context: Option<SslContext>,
         max_buffer_size: usize,
     ) -> Result<Self, std::io::Error> {
+        let workers = config.worker().threads();
+        let balance = config.worker().balance();
         let config = config.server();
 
         let addr = config.socket_addr().map_err(|e| {
@@ -53,7 +63,7 @@ impl ListenerBuilder {
             error!("{}", e);
             std::io::Error::new(std::io::ErrorKind::Other, "Failed to create epoll instance")
         })?;
-
+        
         poll.bind(addr)?;
 
         let nevent = config.nevent();
@@ -66,6 +76,8 @@ impl ListenerBuilder {
             ssl_context,
             timeout,
             max_buffer_size,
+            balance,
+            workers
         })
     }
 
@@ -87,6 +99,9 @@ impl ListenerBuilder {
             timeout: self.timeout,
             signal_queue,
             session_queue,
+            balance: self.balance,
+            workers: self.workers,
+            napi_ids: Vec::new(),
         }
     }
 }
@@ -100,6 +115,9 @@ pub struct Listener {
     timeout: Duration,
     signal_queue: Queues<(), Signal>,
     session_queue: Queues<Session, ()>,
+    balance: Balance,
+    workers: usize,
+    napi_ids: Vec<u32>,
 }
 
 impl Listener {
@@ -142,12 +160,40 @@ impl Listener {
 
     /// Adds a new fully established TLS session
     fn add_established_tls_session(&mut self, stream: SslStream<TcpStream>) {
-        let session =
-            Session::tls_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
-        trace!("accepted new session: {:?}", session);
-        if self.session_queue.try_send_any(session).is_err() {
-            error!("error sending session to worker");
-            TCP_ACCEPT_EX.increment();
+        match self.balance {
+            Balance::Random => {
+                let session =
+                    Session::tls_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
+                trace!("accepted new session: {:?}", session);
+                if self.session_queue.try_send_any(session).is_err() {
+                    error!("error sending session to random worker");
+                    TCP_ACCEPT_EX.increment();
+                }
+            }
+            Balance::Queues => {
+                let napi_id: u32 = stream.get_ref().getsockopt(libc::SOL_SOCKET, SO_INCOMING_NAPI_ID).unwrap();
+                let session =
+                    Session::tls_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
+                trace!("accepted new session: {:?}", session);
+                if napi_id > 0 {
+                    let worker_id = self.napi_ids.iter().position(|&v| v == napi_id)
+                        .unwrap_or_else(|| {
+                            info!("found new napi_id {}", napi_id);
+                            self.napi_ids.push(napi_id);
+                            self.napi_ids.len() - 1
+                        }) % self.workers;
+                    trace!("napi_id {} mapped to worker {}", napi_id, worker_id);
+                    if self.session_queue.try_send_to(worker_id, session).is_err() {
+                        error!("error sending session to worker {}", worker_id);
+                        TCP_ACCEPT_EX.increment();
+                    }
+                } else {
+                    if self.session_queue.try_send_any(session).is_err() {
+                        error!("error sending session to random worker");
+                        TCP_ACCEPT_EX.increment();
+                    }
+                }
+            }
         }
     }
 
@@ -166,12 +212,40 @@ impl Listener {
 
     /// Adds a new plain (non-TLS) session
     fn add_plain_session(&mut self, stream: TcpStream) {
-        let session =
-            Session::plain_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
-        trace!("accepted new session: {:?}", session);
-        if self.session_queue.try_send_any(session).is_err() {
-            error!("error sending session to worker");
-            TCP_ACCEPT_EX.increment();
+        match self.balance {
+            Balance::Random => {
+                let session =
+                    Session::plain_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
+                trace!("accepted new session: {:?}", session);
+                if self.session_queue.try_send_any(session).is_err() {
+                    error!("error sending session to random worker");
+                    TCP_ACCEPT_EX.increment();
+                }
+            }
+            Balance::Queues => {
+                let napi_id: u32 = stream.getsockopt(libc::SOL_SOCKET, SO_INCOMING_NAPI_ID).unwrap();
+                let session =
+                    Session::plain_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
+                trace!("accepted new session: {:?}", session);
+                if napi_id > 0 {
+                    let worker_id = self.napi_ids.iter().position(|&v| v == napi_id)
+                        .unwrap_or_else(|| {
+                            info!("found new napi_id {}", napi_id);
+                            self.napi_ids.push(napi_id);
+                            self.napi_ids.len() - 1
+                        }) % self.workers;
+                    trace!("napi_id {} mapped to worker {}", napi_id, worker_id);
+                    if self.session_queue.try_send_to(worker_id, session).is_err() {
+                        error!("error sending session to worker {}", worker_id);
+                        TCP_ACCEPT_EX.increment();
+                    }
+                } else {
+                    if self.session_queue.try_send_any(session).is_err() {
+                        error!("error sending session to random worker");
+                        TCP_ACCEPT_EX.increment();
+                    }
+                }
+            }
         }
     }
 

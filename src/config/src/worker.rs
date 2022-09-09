@@ -9,6 +9,15 @@ const WORKER_TIMEOUT: usize = 100;
 const WORKER_NEVENT: usize = 1024;
 const WORKER_THREADS: usize = 1;
 
+// default worker balance strategy
+const WORKER_BALANCE: Balance = Balance::Random;
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub enum Balance {
+    Random,
+    Queues,
+}
+
 // helper functions
 fn timeout() -> usize {
     WORKER_TIMEOUT
@@ -22,6 +31,10 @@ fn threads() -> usize {
     WORKER_THREADS
 }
 
+fn balance() -> Balance {
+    WORKER_BALANCE
+}
+
 // definitions
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Worker {
@@ -31,6 +44,8 @@ pub struct Worker {
     nevent: usize,
     #[serde(default = "threads")]
     threads: usize,
+    #[serde(default = "balance")]
+    balance: Balance,
 }
 
 // implementation
@@ -47,6 +62,10 @@ impl Worker {
         self.threads
     }
 
+    pub fn balance(&self) -> Balance {
+        self.balance
+    }
+
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads
     }
@@ -59,6 +78,7 @@ impl Default for Worker {
             timeout: timeout(),
             nevent: nevent(),
             threads: threads(),
+            balance: balance(),
         }
     }
 }

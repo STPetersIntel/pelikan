@@ -8,6 +8,9 @@
 use std::convert::TryFrom;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+use std::fmt::Debug;
 
 use crate::{TCP_RECV_BYTE, TCP_SEND_BYTE, TCP_SEND_PARTIAL};
 
@@ -22,6 +25,42 @@ impl TcpStream {
 
     pub fn peer_addr(&self) -> Result<SocketAddr, std::io::Error> {
         self.inner.peer_addr()
+    }
+
+    // stefan: add setsockopt to wrapped TcpStream
+    pub fn setsockopt<T>(&self, level: libc::c_int, optname: libc::c_int, optval: T) 
+            -> Result<(), std::io::Error> {
+        unsafe {
+            let res = libc::setsockopt(
+                self.inner.as_raw_fd(), level, optname, 
+                &optval as *const T as *const libc::c_void, 
+                std::mem::size_of::<T>() as libc::socklen_t
+            );
+            if res == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    // stefan: add getsockopt to wrapped TcpStream
+    pub fn getsockopt<T: Copy + Debug>(&self, level: libc::c_int, optname: libc::c_int) 
+            -> Result<T, std::io::Error> {
+        unsafe {
+            let mut optval: T = std::mem::zeroed();
+            let mut optlen = std::mem::size_of::<T>() as libc::socklen_t;
+            let res = libc::getsockopt(
+                self.inner.as_raw_fd(), level, optname,
+                &mut optval as *mut T as *mut libc::c_void, &mut optlen
+            );
+            if res == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                assert_eq!(optlen as usize, std::mem::size_of::<T>());
+                Ok(optval)
+            }
+        }
     }
 }
 

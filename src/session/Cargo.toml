@@ -13,6 +13,7 @@ license = "Apache-2.0"
 [dependencies]
 common = { path = "../common" }
 config = { path = "../config" }
+libc = "0.2.83"
 logger = { path = "../logger" }
 mio = { version = "0.8.0", features = ["os-poll", "net"] }
 rand = "0.8.0"
