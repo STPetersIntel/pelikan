@@ -27,25 +27,16 @@ impl TcpStream {
         self.inner.peer_addr()
     }
 
-    // stefan: add setsockopt to wrapped TcpStream
-    pub fn setsockopt<T>(&self, level: libc::c_int, optname: libc::c_int, optval: T) 
-            -> Result<(), std::io::Error> {
-        unsafe {
-            let res = libc::setsockopt(
-                self.inner.as_raw_fd(), level, optname, 
-                &optval as *const T as *const libc::c_void, 
-                std::mem::size_of::<T>() as libc::socklen_t
-            );
-            if res == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        }
+    pub fn napi_id(&self) -> Result<u32, std::io::Error> {
+        self.getsockopt(libc::SOL_SOCKET, libc::SO_INCOMING_NAPI_ID)
+    }
+
+    pub fn set_priority(&self, priority: u32) -> Result<(), std::io::Error> {
+        self.setsockopt(libc::SOL_SOCKET, libc::SO_PRIORITY, priority)
     }
 
     // stefan: add getsockopt to wrapped TcpStream
-    pub fn getsockopt<T: Copy + Debug>(&self, level: libc::c_int, optname: libc::c_int) 
+    fn getsockopt<T: Copy + Debug>(&self, level: libc::c_int, optname: libc::c_int) 
             -> Result<T, std::io::Error> {
         unsafe {
             let mut optval: T = std::mem::zeroed();
@@ -62,6 +53,24 @@ impl TcpStream {
             }
         }
     }
+
+    // stefan: add setsockopt to wrapped TcpStream
+    fn setsockopt<T>(&self, level: libc::c_int, optname: libc::c_int, optval: T) 
+            -> Result<(), std::io::Error> {
+        unsafe {
+            let res = libc::setsockopt(
+                self.inner.as_raw_fd(), level, optname, 
+                &optval as *const T as *const libc::c_void, 
+                std::mem::size_of::<T>() as libc::socklen_t
+            );
+            if res == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
 }
 
 impl TryFrom<mio::net::TcpStream> for TcpStream {

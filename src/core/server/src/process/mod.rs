@@ -43,7 +43,7 @@ where
     ///
     /// This function will terminate the program execution if there are any
     /// issues encountered while initializing the components.
-    pub fn new<T: AdminConfig + ServerConfig + WorkerConfig + TlsConfig>(
+    pub fn new<T: AdminConfig + ServerConfig + WorkerConfig + TlsConfig + TcpConfig>(
         config: T,
         storage: Storage,
         max_buffer_size: usize,

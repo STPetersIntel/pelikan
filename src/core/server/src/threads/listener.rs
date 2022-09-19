@@ -10,8 +10,8 @@ use crate::poll::{Poll, LISTENER_TOKEN, WAKER_TOKEN};
 use crate::*;
 use common::signal::Signal;
 use common::ssl::{HandshakeError, MidHandshakeSslStream, Ssl, SslContext, SslStream};
-// stefan: add WorkerConfig
-use config::{ServerConfig, WorkerConfig};
+// stefan: add WorkerConfig and TcpConfig
+use config::{ServerConfig, WorkerConfig, TcpConfig};
 use config::worker::Balance;
 use mio::event::Event;
 use mio::Events;
@@ -21,10 +21,6 @@ use session::{Session, TcpStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-
-// stefan: add missing libc consts
-// const SO_PRIORITY: libc::c_int = 12;
-const SO_INCOMING_NAPI_ID: libc::c_int = 56;
 
 counter!(SERVER_EVENT_ERROR);
 counter!(SERVER_EVENT_WRITE);
@@ -40,19 +36,21 @@ pub struct ListenerBuilder {
     ssl_context: Option<SslContext>,
     timeout: Duration,
     balance: Balance,
+    priority: u32,
     workers: usize,
 }
 
 impl ListenerBuilder {
     /// Creates a new `Listener` from a `ServerConfig` and an optional
     /// `SslContext`.
-    pub fn new<T: ServerConfig + WorkerConfig>(
+    pub fn new<T: ServerConfig + WorkerConfig + TcpConfig>(
         config: &T,
         ssl_context: Option<SslContext>,
         max_buffer_size: usize,
     ) -> Result<Self, std::io::Error> {
         let workers = config.worker().threads();
         let balance = config.worker().balance();
+        let priority = config.tcp().priority();
         let config = config.server();
 
         let addr = config.socket_addr().map_err(|e| {
@@ -77,6 +75,7 @@ impl ListenerBuilder {
             timeout,
             max_buffer_size,
             balance,
+            priority,
             workers
         })
     }
@@ -100,6 +99,7 @@ impl ListenerBuilder {
             signal_queue,
             session_queue,
             balance: self.balance,
+            priority: self.priority,
             workers: self.workers,
             napi_ids: Vec::new(),
         }
@@ -116,6 +116,7 @@ pub struct Listener {
     signal_queue: Queues<(), Signal>,
     session_queue: Queues<Session, ()>,
     balance: Balance,
+    priority: u32,
     workers: usize,
     napi_ids: Vec<u32>,
 }
@@ -127,6 +128,9 @@ impl Listener {
     // the overhead of re-registering the listener after each accept.
     fn do_accept(&mut self) {
         if let Ok((stream, _)) = self.poll.accept() {
+            // stefan: set socket priority
+            stream.set_priority(self.priority)
+                .expect("Error setting socket priority");
             // handle TLS if it is configured
             if let Some(ssl_context) = &self.ssl_context {
                 match Ssl::new(ssl_context).map(|v| v.accept(stream)) {
@@ -171,7 +175,7 @@ impl Listener {
                 }
             }
             Balance::Queues => {
-                let napi_id: u32 = stream.get_ref().getsockopt(libc::SOL_SOCKET, SO_INCOMING_NAPI_ID).unwrap();
+                let napi_id: u32 = stream.get_ref().napi_id().unwrap_or(0);
                 let session =
                     Session::tls_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
                 trace!("accepted new session: {:?}", session);
@@ -223,7 +227,7 @@ impl Listener {
                 }
             }
             Balance::Queues => {
-                let napi_id: u32 = stream.getsockopt(libc::SOL_SOCKET, SO_INCOMING_NAPI_ID).unwrap();
+                let napi_id: u32 = stream.napi_id().unwrap_or(0);
                 let session =
                     Session::plain_with_capacity(stream, crate::DEFAULT_BUFFER_SIZE, self.max_buffer_size);
                 trace!("accepted new session: {:?}", session);
